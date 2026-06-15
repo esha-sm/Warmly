@@ -16,5 +16,10 @@ AI-powered cold outreach tool that writes and sends hyper-personalized emails fr
 4. Emails sync to Instantly for automated sending, follow-ups, and reply tracking
 5. Reply data feeds back into Claude to improve future emails
 
+## Future Improvements
+
+1. Emails sync to Instantly for automated sending, follow-ups, and reply tracking
+2. Reply data feeds back into Claude to improve future emails
+
 ## Live demo
 [Click here](https://gtm-outreach-rho.vercel.app/)
