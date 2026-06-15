@@ -17,4 +17,4 @@ AI-powered cold outreach tool that writes and sends hyper-personalized emails fr
 5. Reply data feeds back into Claude to improve future emails
 
 ## Live demo
-[Live Demo](https://gtm-outreach-rho.vercel.app/)
+[Click here](https://gtm-outreach-rho.vercel.app/)
