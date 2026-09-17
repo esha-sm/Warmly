@@ -1,216 +1,445 @@
 'use client'
-import { useState, useEffect } from 'react'
 
-function TypedText({ text }: { text: string }) {
-  const [displayed, setDisplayed] = useState('')
+import { useEffect, useState } from 'react'
+import compose from './compose.module.css'
 
-  useEffect(() => {
-    if (!text) return
-    setDisplayed('')
-    let i = 0
-    const interval = setInterval(() => {
-      setDisplayed(text.slice(0, i))
-      i++
-      if (i > text.length) clearInterval(interval)
-    }, 12)
-    return () => clearInterval(interval)
-  }, [text])
+type LeadStatus = 'New' | 'Email found' | 'Drafted' | 'Sent' | 'Replied' | 'Follow-up needed' | 'Closed'
+type Lead = Record<string, string> & { id: string; status: LeadStatus; tags: string; notes: string; snoozedUntil: string; sentAt: string }
+type Email = { subject: string; body: string }
 
-  return <span>{displayed}<span className="animate-pulse text-lime-400">|</span></span>
+const followUpAfterDays = 3
+const heroLine = 'Find, write, send, and track - all in one place.'
+
+function nameOf(lead: Lead, index: number) {
+  return lead['First name, Last name'] || lead['Company name'] || `Lead ${index + 1}`
+}
+
+function hasPerson(lead: Lead) {
+  return Boolean(lead['First name, Last name']?.trim())
+}
+
+function initials(name: string) {
+  return name.split(' ').filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase() || '?'
+}
+
+function makeLead(raw: Record<string, string>, index: number): Lead {
+  const email = raw.Email || raw.email || ''
+  return { ...raw, id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`, status: email ? 'Email found' : 'New', tags: raw.tags || '', notes: '', snoozedUntil: '', sentAt: '', Email: email }
+}
+
+function pasteLooksLikeCompanyLink(text: string) {
+  const trimmed = text.trim()
+  const leftover = trimmed.replace(/https?:\/\/[^\s]+/gi, '').trim()
+  return /https?:\/\//i.test(trimmed) && leftover.length < 8
+}
+
+function dayKey(value: string) {
+  return value.slice(0, 10)
+}
+
+function isToday(value: string) {
+  return dayKey(value) === new Date().toISOString().slice(0, 10)
+}
+
+function daysSince(value: string) {
+  const then = Date.parse(`${dayKey(value)}T00:00:00`)
+  const now = Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00`)
+  return Math.round((now - then) / 86400000)
+}
+
+function sendStreak(leads: Lead[]) {
+  const days = new Set(leads.filter(lead => lead.sentAt).map(lead => dayKey(lead.sentAt)))
+  const cursor = new Date()
+  if (!days.has(cursor.toISOString().slice(0, 10))) cursor.setDate(cursor.getDate() - 1)
+  let streak = 0
+  while (days.has(cursor.toISOString().slice(0, 10))) {
+    streak += 1
+    cursor.setDate(cursor.getDate() - 1)
+  }
+  return streak
 }
 
 export default function Home() {
-  const [apiKey, setApiKey] = useState('')
   const [background, setBackground] = useState('')
-  const [leads, setLeads] = useState<Record<string, string>[]>([])
-  const [emails, setEmails] = useState<Record<number, {subject: string, body: string}>>({})
-  const [loading, setLoading] = useState<Record<number, boolean>>({})
-  const [selected, setSelected] = useState<number | null>(null)
+  const [pasteText, setPasteText] = useState('')
+  const [leads, setLeads] = useState<Lead[]>([])
+  const [emails, setEmails] = useState<Record<string, Email>>({})
+  const [loading, setLoading] = useState<Record<string, boolean>>({})
+  const [findingEmail, setFindingEmail] = useState<Record<string, boolean>>({})
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const [parseLoading, setParseLoading] = useState(false)
+  const [replyLoading, setReplyLoading] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [typedHero, setTypedHero] = useState('')
+  const [dailyGoal, setDailyGoal] = useState(5)
 
-  function handleCSV(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setTypedHero(heroLine)
+      return
+    }
+
+    let index = 0
+    let timeout = window.setTimeout(function type() {
+      index += 1
+      setTypedHero(heroLine.slice(0, index))
+      if (index < heroLine.length) timeout = window.setTimeout(type, 42)
+    }, 420)
+
+    return () => window.clearTimeout(timeout)
+  }, [])
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem('warmly-leads')
+    const savedBackground = window.localStorage.getItem('warmly-background')
+    const savedGoal = window.localStorage.getItem('warmly-goal')
+    if (saved) setLeads(JSON.parse(saved))
+    if (savedBackground) setBackground(savedBackground)
+    if (savedGoal) setDailyGoal(Number(savedGoal) || 5)
+  }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem('warmly-leads', JSON.stringify(leads))
+    window.localStorage.setItem('warmly-background', background)
+    window.localStorage.setItem('warmly-goal', String(dailyGoal))
+  }, [leads, background, dailyGoal])
+
+  useEffect(() => {
+    setLeads(current => current.map(lead => {
+      if (lead.status !== 'Sent' || !lead.sentAt || daysSince(lead.sentAt) < followUpAfterDays) return lead
+      return { ...lead, status: 'Follow-up needed' }
+    }))
+  }, [leads.length])
+
+  const selected = leads.find(lead => lead.id === selectedId) || null
+  const sentToday = leads.filter(lead => lead.sentAt && isToday(lead.sentAt)).length
+  const streak = sendStreak(leads)
+
+  function updateLead(id: string, changes: Record<string, string>) {
+    setLeads(current => current.map(lead => lead.id === id ? { ...lead, ...changes } : lead))
+  }
+
+  function replaceLeads(next: Lead[]) {
+    setLeads(next)
+    setSelectedId(next[0]?.id || null)
+    setEmails({})
+  }
+
+  function clearLeads() {
+    replaceLeads([])
+    setError('')
+  }
+
+  function handleCSV(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = (event: ProgressEvent<FileReader>) => {
-      const text = event.target?.result as string
+    reader.onload = loadEvent => {
+      const text = loadEvent.target?.result as string
       const rows = text.trim().split('\n')
-      const headers = rows[0].match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)
-        ?.map(h => h.replace(/"/g, '').trim()) || []
-      const parsed = rows.slice(1).map(row => {
-        const values = row.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)
-          ?.map(v => v.replace(/"/g, '').trim()) || []
-        const obj: Record<string, string> = {}
-        headers.forEach((h, i) => obj[h] = values[i] || '')
-        return obj
+      const headers = rows[0]?.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)?.map(value => value.replace(/"/g, '').trim()) || []
+      const parsed = rows.slice(1).filter(Boolean).map((row, index) => {
+        const values = row.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)?.map(value => value.replace(/"/g, '').trim()) || []
+        const raw: Record<string, string> = {}
+        headers.forEach((header, valueIndex) => { raw[header] = values[valueIndex] || '' })
+        return makeLead(raw, index)
       })
-      setLeads(parsed)
+      replaceLeads(parsed)
     }
     reader.readAsText(file)
   }
 
-  async function generateEmail(lead: Record<string, string>, index: number) {
-    setLoading(prev => ({ ...prev, [index]: true }))
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey,
-        background,
-        lead: {
-          name: lead['First name, Last name'] || '',
-          company: lead['Company name'] || '',
-          title: lead['Title'] || '',
-          summary: lead['Company One-Sentence Summary'] || '',
-          challenge: lead['Growth Challenge'] || '',
-          news: lead['Recent Company News'] || '',
-        }
-      })
-    })
-    const text = await res.text()
-    const email = JSON.parse(text)
-    setEmails(prev => ({ ...prev, [index]: email }))
-    setLoading(prev => ({ ...prev, [index]: false }))
-    setSelected(index)
-  }
-
-  async function generateAll() {
-    for (let i = 0; i < leads.length; i++) {
-      await generateEmail(leads[i], i)
+  async function parsePastedLeads() {
+    setParseLoading(true)
+    setError('')
+    try {
+      const endpoint = pasteLooksLikeCompanyLink(pasteText) ? '/api/discover' : '/api/parse'
+      const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: pasteText }) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Unable to parse leads')
+      const parsedLeads = (data.leads || []).map((lead: Record<string, string>, index: number) => makeLead(lead, index))
+      replaceLeads(parsedLeads)
+      const companyUrls = [...new Set(parsedLeads.map(lead => lead['Company URL']).filter(Boolean))]
+      for (const url of companyUrls) {
+        const alreadyEnriched = parsedLeads.some(lead => lead['Company URL'] === url && lead['Company One-Sentence Summary'])
+        if (alreadyEnriched) continue
+        const enrichResponse = await fetch('/api/enrich', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
+        if (!enrichResponse.ok) continue
+        const enrichment = await enrichResponse.json()
+        setLeads(current => current.map(lead => lead['Company URL'] !== url ? lead : {
+          ...lead,
+          'Company name': enrichment.companyName || lead['Company name'] || '',
+          'Company One-Sentence Summary': enrichment.summary || lead['Company One-Sentence Summary'] || '',
+          'Growth Challenge': enrichment.challenge || lead['Growth Challenge'] || '',
+          'Recent Company News': enrichment.news || lead['Recent Company News'] || '',
+        }))
+      }
+      const unnamed = parsedLeads.filter(lead => !hasPerson(lead))
+      const missingEmail = parsedLeads.filter(lead => hasPerson(lead) && !lead.Email?.trim())
+      for (const lead of missingEmail) {
+        await findEmail(lead)
+      }
+      if (unnamed.length && unnamed.length === parsedLeads.length) {
+        setError('We found the company. Add a contact name (and email if you have it), then draft.')
+      }
+      setPasteText('')
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : 'Unable to parse leads')
+    } finally {
+      setParseLoading(false)
     }
   }
 
+  async function findEmail(lead: Lead) {
+    const [firstName, ...rest] = (lead['First name, Last name'] || '').split(' ')
+    if (!firstName || !rest.length) {
+      setError('Add a first and last name before looking up an email.')
+      return
+    }
+    setFindingEmail(current => ({ ...current, [lead.id]: true }))
+    setError('')
+    try {
+      const response = await fetch('/api/find-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          firstName,
+          lastName: rest.join(' '),
+          domain: lead['Company URL'] || '',
+          company: lead['Company name'] || '',
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error)
+      updateLead(lead.id, {
+        Email: data.email,
+        status: 'Email found',
+        'Company name': data.companyName || lead['Company name'] || '',
+        'Company URL': data.companyUrl || lead['Company URL'] || '',
+      })
+      return data.email as string
+    } catch (findError) {
+      setError(findError instanceof Error ? findError.message : 'Unable to find email')
+    } finally {
+      setFindingEmail(current => ({ ...current, [lead.id]: false }))
+    }
+  }
+
+  async function generateEmail(lead: Lead) {
+    setSelectedId(lead.id)
+    if (!hasPerson(lead)) {
+      setError('Add a first and last name before drafting. A company URL alone is not a contact.')
+      return
+    }
+    if (!background.trim()) {
+      setError('Add your background so the draft can be personalized.')
+      return
+    }
+    setLoading(current => ({ ...current, [lead.id]: true }))
+    setError('')
+    try {
+      const response = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ background, followUp: lead.status === 'Follow-up needed', lead: { name: lead['First name, Last name'] || '', company: lead['Company name'] || '', title: lead.Title || '', summary: lead['Company One-Sentence Summary'] || '', challenge: lead['Growth Challenge'] || '', news: lead['Recent Company News'] || '' } }) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Unable to generate email')
+      setEmails(current => ({ ...current, [lead.id]: data }))
+      updateLead(lead.id, { status: 'Drafted' })
+    } catch (generateError) {
+      setError(generateError instanceof Error ? generateError.message : 'Unable to generate email')
+    } finally {
+      setLoading(current => ({ ...current, [lead.id]: false }))
+    }
+  }
+
+  async function checkReplies() {
+    const sent = leads.filter(lead => lead.Email && (lead.status === 'Sent' || lead.status === 'Follow-up needed'))
+    if (!sent.length) {
+      setError('Send at least one email first, then check Gmail for replies.')
+      return
+    }
+    setReplyLoading(true)
+    setError('')
+    try {
+      const response = await fetch('/api/replies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leads: sent.map(lead => ({ id: lead.id, email: lead.Email, sentAt: lead.sentAt })) }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        if (data.configured === false) {
+          window.location.href = '/api/gmail/connect'
+          return
+        }
+        throw new Error(data.error || 'Unable to check Gmail')
+      }
+      const ids = new Set(data.ids || [])
+      if (!ids.size) {
+        setError('No new replies in Gmail for sent leads.')
+        return
+      }
+      setLeads(current => current.map(lead => ids.has(lead.id) ? { ...lead, status: 'Replied' } : lead))
+    } catch (replyError) {
+      setError(replyError instanceof Error ? replyError.message : 'Unable to check Gmail')
+    } finally {
+      setReplyLoading(false)
+    }
+  }
+
+  function sendEmail(lead: Lead) {
+    const email = emails[lead.id]
+    if (!email) return
+    window.location.href = `mailto:${encodeURIComponent(lead.Email || '')}?subject=${encodeURIComponent(email.subject)}&body=${encodeURIComponent(email.body)}`
+    updateLead(lead.id, { status: 'Sent', sentAt: new Date().toISOString() })
+  }
+
   function copyEmail() {
-    if (selected === null) return
-    const email = emails[selected]
+    if (!selected || !emails[selected.id]) return
+    const email = emails[selected.id]
     navigator.clipboard.writeText(`Subject: ${email.subject}\n\n${email.body}`)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }
 
-  const doneCount = Object.keys(emails).length
+  function updateDraft(changes: Partial<Email>) {
+    if (!selected) return
+    setEmails(current => ({
+      ...current,
+      [selected.id]: {
+        subject: current[selected.id]?.subject || '',
+        body: current[selected.id]?.body || '',
+        ...changes,
+      },
+    }))
+  }
+
+  const activeEmail = selected ? emails[selected.id] : null
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-white">
-      <div className="border-b border-zinc-800 px-8 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-lime-400 flex items-center justify-center">
-            <span className="text-black text-sm font-bold">W</span>
+    <main className="app-shell">
+      <nav className="flow-nav" aria-label="Primary navigation">
+        <div className="flow-brand">
+          <span className="flow-mark" aria-hidden="true">
+            <span className="flow-envelope"><span className="flow-seal">W</span></span>
+          </span>
+          Warmly
+        </div>
+        <div className="flow-links">
+          <span className="goal-label">{sentToday}/{dailyGoal} sent · {streak}-day streak</span>
+          <label className="goal-edit">Goal
+            <input type="number" min="1" max="20" value={dailyGoal} onChange={event => setDailyGoal(Number(event.target.value) || 1)} />
+          </label>
+          <button className="flow-nav-cta" onClick={checkReplies} disabled={replyLoading}>{replyLoading ? 'Checking…' : 'Check replies'}</button>
+        </div>
+      </nav>
+
+      <header className="hero-bar">
+        <div className="hero-copy-wrap">
+          <h1>Messy notes into cold outreach.</h1>
+          <p className="hero-copy" aria-label={heroLine}>
+            {typedHero}
+            <span className="hero-cursor" aria-hidden="true">|</span>
+          </p>
+        </div>
+      </header>
+
+      <section className="workspace-grid">
+        <div className="lead-column">
+          <div className="section-heading">
+            <h2>{leads.length} lead{leads.length === 1 ? '' : 's'}</h2>
+            {leads.length > 0 && <button className="outline-button" onClick={clearLeads}>Clear</button>}
           </div>
-          <div>
-            <span className="font-bold text-lg tracking-tight">Warmly</span>
-            <p className="text-xs text-zinc-500">Upload your leads, paste your background, get hyper-personalized cold emails instantly</p>
+          <div className="import-panel">
+            <label className="eyebrow" htmlFor="your-background">Your background</label>
+            <textarea id="your-background" value={background} onChange={event => setBackground(event.target.value)} placeholder="Roles, strengths, and what you want them to know..." />
+            <label className="eyebrow" htmlFor="quick-capture">Quick capture</label>
+            <textarea id="quick-capture" value={pasteText} onChange={event => setPasteText(event.target.value)} placeholder="Paste a company URL to load people and emails, or paste names..." />
+            <div className="import-actions">
+              <button className="yellow-button" onClick={parsePastedLeads} disabled={!pasteText.trim() || parseLoading}>{parseLoading ? 'Organizing...' : 'Parse pasted leads'}</button>
+              <label className="outline-button file-button">Upload CSV<input type="file" accept=".csv" onChange={handleCSV} /></label>
+            </div>
+          </div>
+          {error && <p className="error-text">{error}</p>}
+          <div className="lead-list">
+            {leads.length ? leads.map((lead, index) => (
+              <button key={lead.id} className={`lead-row ${selectedId === lead.id ? 'selected' : ''}`} onClick={() => { setSelectedId(lead.id); if (hasPerson(lead) && background.trim() && !emails[lead.id]) generateEmail(lead) }}>
+                <span className="avatar">{initials(nameOf(lead, index))}</span>
+                <span className="lead-copy">
+                  <strong>{nameOf(lead, index)}</strong>
+                  <small>{lead.Email || lead['Company name'] || 'Company not listed'}{lead.Title ? ` · ${lead.Title}` : ''}</small>
+                </span>
+                <span className="lead-status">{loading[lead.id] ? 'Writing' : lead.status}</span>
+              </button>
+            )) : (
+              <div className="empty-state">Your queue is clear. Paste names or upload a CSV.</div>
+            )}
           </div>
         </div>
-        {leads.length > 0 && (
-          <span className="text-xs text-lime-400 font-medium">{doneCount}/{leads.length} generated</span>
-        )}
-      </div>
 
-      <div className="flex h-[calc(100vh-65px)]">
-        <div className="w-64 border-r border-zinc-800 p-5 flex flex-col gap-5 overflow-y-auto shrink-0">
-          <div>
-            <label className="block text-xs font-medium text-lime-400 mb-2 uppercase tracking-wider">API Key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={e => setApiKey(e.target.value)}
-              placeholder="sk-ant-..."
-              className="w-full bg-zinc-900 border border-lime-400/30 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-lime-400 transition-colors"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-lime-400 mb-2 uppercase tracking-wider">Your Background</label>
-            <textarea
-              value={background}
-              onChange={e => setBackground(e.target.value)}
-              placeholder="Data analytics grad, worked at X, built Y..."
-              className="w-full bg-zinc-900 border border-lime-400/30 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 h-36 resize-none focus:outline-none focus:border-lime-400 transition-colors"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-lime-400 mb-2 uppercase tracking-wider">Leads</label>
-            <label className="flex items-center gap-2 w-full bg-zinc-900 border border-lime-400/30 border-dashed rounded-lg px-3 py-3 text-sm text-zinc-400 cursor-pointer hover:border-lime-400 hover:text-lime-400 transition-colors">
-              <span>📁</span>
-              <span>{leads.length > 0 ? `${leads.length} leads loaded ✓` : 'Upload CSV'}</span>
-              <input type="file" accept=".csv" onChange={handleCSV} className="hidden" />
-            </label>
-            <p className="text-xs text-zinc-600 mt-2">Works with Apollo, Clay, LinkedIn exports.</p>
-          </div>
-
-          {leads.length > 0 && (
-            <button
-              onClick={generateAll}
-              className="w-full bg-lime-400 hover:bg-lime-300 text-black font-bold rounded-lg px-4 py-3 text-sm transition-colors"
-            >
-              ⚡ Generate All
-            </button>
-          )}
-        </div>
-
-        {leads.length > 0 && (
-          <div className="w-52 border-r border-zinc-800 overflow-y-auto shrink-0">
-            {leads.map((lead, i) => (
-              <div
-                key={i}
-                onClick={() => { setSelected(i); if (!emails[i]) generateEmail(lead, i) }}
-                className={`px-4 py-3 cursor-pointer border-b border-zinc-800/50 transition-colors ${selected === i ? 'bg-lime-400/10 border-l-2 border-l-lime-400' : 'hover:bg-zinc-900'}`}
-              >
-                <div className={`font-medium text-sm truncate ${selected === i ? 'text-lime-400' : 'text-white'}`}>
-                  {(lead['First name, Last name'] || `Lead ${i+1}`).split(' ')[0]}
+        <aside className="detail-column">
+          {selected ? (
+            <>
+              <article className={compose.root}>
+                <div className={compose.titlebar}>
+                  <span className={compose.dots} aria-hidden="true">
+                    <span className={`${compose.dot} ${compose.dotRed}`} />
+                    <span className={`${compose.dot} ${compose.dotYellow}`} />
+                    <span className={`${compose.dot} ${compose.dotGreen}`} />
+                  </span>
+                  New message
                 </div>
-                <div className="text-xs text-zinc-500 truncate">{lead['Company name']}</div>
-                <div className="text-xs mt-1">
-                  {loading[i] ? <span className="text-lime-400">writing...</span> : emails[i] ? <span className="text-lime-400">✓</span> : ''}
+                <div className={compose.row}>
+                  <span className={compose.label}>To</span>
+                  <div className={compose.to}>
+                    <span className={compose.chip}>
+                      <span className={compose.chipAvatar}>{initials(nameOf(selected, leads.indexOf(selected)))}</span>
+                      <span className={compose.chipName}>{nameOf(selected, leads.indexOf(selected))}</span>
+                    </span>
+                    <span className={compose.address}>{selected.Email || 'name@company.com'}</span>
+                    <button className={compose.find} type="button" onClick={() => findEmail(selected)} disabled={findingEmail[selected.id]}>
+                      {findingEmail[selected.id] ? 'Finding…' : 'Find'}
+                    </button>
+                    <span className={compose.company}>{selected['Company name'] || ''}</span>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="flex-1 overflow-y-auto p-8">
-          {selected !== null && emails[selected] ? (
-            <div className="max-w-2xl">
-              <div className="flex items-start justify-between mb-6">
-                <div>
-                  <div className="text-xs text-lime-400 uppercase tracking-wider mb-1">Subject</div>
-                  <div className="text-xl font-semibold text-white">{emails[selected].subject}</div>
+                <div className={compose.row}>
+                  <span className={compose.label}>Subject</span>
+                  <input
+                    className={compose.subject}
+                    value={activeEmail?.subject || ''}
+                    onChange={event => updateDraft({ subject: event.target.value })}
+                    placeholder="Subject"
+                  />
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => selected !== null && generateEmail(leads[selected], selected)}
-                    className="px-4 py-2 rounded-lg text-sm font-medium bg-lime-400/20 hover:bg-lime-400/30 text-lime-400 border border-lime-400/40 transition-colors"
-                  >
-                    ↺ Regenerate
-                  </button>
-                  <button
-                    onClick={copyEmail}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${copied ? 'bg-lime-400 text-black' : 'bg-lime-400/20 hover:bg-lime-400/30 text-lime-400 border border-lime-400/40'}`}
-                  >
-                    {copied ? '✓ Copied!' : 'Copy'}
-                  </button>
+                {loading[selected.id] ? (
+                  <p className={compose.loading}>Writing…</p>
+                ) : (
+                  <textarea
+                    className={compose.body}
+                    value={activeEmail?.body || ''}
+                    onChange={event => updateDraft({ body: event.target.value })}
+                    placeholder="Write or generate a note…"
+                  />
+                )}
+                <div className={compose.footer}>
+                  <button className={compose.ghost} type="button" onClick={() => generateEmail(selected)}>New</button>
+                  <div className={compose.actions}>
+                    <button className={compose.ghost} type="button" onClick={() => generateEmail(selected)} disabled={loading[selected.id]}>
+                      {loading[selected.id] ? 'Writing…' : 'Regenerate'}
+                    </button>
+                    <button className={compose.ghost} type="button" onClick={copyEmail} disabled={!activeEmail}>
+                      {copied ? 'Copied' : 'Copy'}
+                    </button>
+                    <button className={compose.send} type="button" onClick={() => sendEmail(selected)} disabled={!activeEmail?.body}>
+                      Send →
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div className="bg-zinc-900 rounded-xl p-6 border border-lime-400/20 text-zinc-300 leading-relaxed whitespace-pre-wrap text-sm">
-                <TypedText text={emails[selected].body} />
-              </div>
-            </div>
-          ) : selected !== null && loading[selected] ? (
-            <div className="flex items-center gap-3 text-zinc-500">
-              <div className="w-4 h-4 border-2 border-lime-400 border-t-transparent rounded-full animate-spin" />
-              Writing email...
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <div className="text-4xl mb-4">⚡</div>
-              <div className="text-zinc-400 text-sm">Select a lead to generate an email</div>
-              <div className="text-zinc-600 text-xs mt-2">or hit Generate All to run all leads at once</div>
-            </div>
-          )}
-        </div>
-      </div>
+              </article>
+            </>
+          ) : <div className="empty-detail">Select a lead to review its context and draft.</div>}
+        </aside>
+      </section>
     </main>
   )
 }
