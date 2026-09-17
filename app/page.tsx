@@ -158,9 +158,9 @@ export default function Home() {
       const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: pasteText }) })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Unable to parse leads')
-      const parsedLeads = (data.leads || []).map((lead: Record<string, string>, index: number) => makeLead(lead, index))
+      const parsedLeads: Lead[] = (data.leads || []).map((lead: Record<string, string>, index: number) => makeLead(lead, index))
       replaceLeads(parsedLeads)
-      const companyUrls = [...new Set(parsedLeads.map(lead => lead['Company URL']).filter(Boolean))]
+      const companyUrls = [...new Set(parsedLeads.map((lead: Lead) => lead['Company URL']).filter(Boolean))]
       for (const url of companyUrls) {
         const alreadyEnriched = parsedLeads.some(lead => lead['Company URL'] === url && lead['Company One-Sentence Summary'])
         if (alreadyEnriched) continue
